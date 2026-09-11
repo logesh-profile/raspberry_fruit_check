@@ -56,10 +56,10 @@ print('Core runtime packages verified successfully.')
 
 "$VENV_PATH/bin/python" -c "
 try:
-    import adafruit_dht
-    print('adafruit_dht verified successfully.')
+    import grovepi
+    print('grovepi verified successfully.')
 except Exception as e:
-    print(f'NOTE: adafruit_dht notice: {e} (Fallback simulation active).')
+    print(f'NOTE: grovepi notice: {e} (Fallback simulation active).')
 "
 
 echo "6. Verifying production ONNX models..."

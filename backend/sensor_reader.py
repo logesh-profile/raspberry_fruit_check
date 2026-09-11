@@ -1,32 +1,37 @@
 import random
 import time
+import math
 from typing import Dict, Any
 
 class SensorReader:
     """
     Sensor Abstraction Layer for RIPENX.
-    Reads physical sensors on Raspberry Pi GPIO or provides smooth
+    Reads physical sensors on Raspberry Pi GrovePi or provides smooth
     hardware telemetry simulation for offline development environments.
     """
 
     def __init__(self):
         self.is_hardware_available = False
-        self.dht_device = None
-        self.mq2_channel = None
+        self.grovepi = None
         
-        # Try initializing hardware Adafruit DHT or RPi.GPIO
+        self.dht_pin = 8    # GrovePi D8
+        self.dht_type = 1   # DHT22 (0 for DHT11)
+        self.gas_pin = 0    # GrovePi A0
+        
+        # Try initializing hardware GrovePi
         try:
-            import board
-            import adafruit_dht
-            self.dht_device = adafruit_dht.DHT22(board.D4)
+            import grovepi
+            self.grovepi = grovepi
             self.is_hardware_available = True
-            print("Physical DHT22 Sensor initialized on GPIO 4.")
-        except Exception:
+            print("Physical GrovePi initialized (DHT22 on D8, Gas on A0).")
+        except Exception as e:
             self.is_hardware_available = False
-            # Dev environment simulation state
-            self._sim_temp = 28.4
-            self._sim_humidity = 64.0
-            self._sim_gas = 124
+            print(f"Warning: Failed to initialize physical GrovePi sensors: {e}")
+            
+        # Dev environment simulation state
+        self._sim_temp = 28.4
+        self._sim_humidity = 64.0
+        self._sim_gas = 124
 
     def read_sensors(self) -> Dict[str, Any]:
         """
@@ -37,21 +42,31 @@ class SensorReader:
           gas_response (Raw ADC / MQ-2 response)
           sensor_status ("connected" | "simulated")
         """
-        if self.is_hardware_available and self.dht_device:
+        if self.is_hardware_available and self.grovepi:
             try:
-                temp = self.dht_device.temperature
-                hum = self.dht_device.humidity
-                gas = 120 # MQ-2 pin read
-                return {
-                    "temperature": round(float(temp), 1) if temp is not None else 28.0,
-                    "humidity": round(float(hum), 1) if hum is not None else 65.0,
-                    "gas_response": gas,
-                    "sensor_status": "connected"
-                }
+                # Read DHT22 from GrovePi D8
+                [t, h] = self.grovepi.dht(self.dht_pin, self.dht_type)
+                
+                # Read Analog Gas Sensor from GrovePi A0
+                g = self.grovepi.analogRead(self.gas_pin)
+                
+                # Verify read validity (grovepi sometimes returns nan on error)
+                if (t is not None and h is not None and g is not None and
+                    not math.isnan(t) and not math.isnan(h) and not math.isnan(g) and
+                    not math.isinf(t) and not math.isinf(h) and not math.isinf(g) and
+                    -100 < t < 100 and 0 <= h <= 100 and g >= 0):
+                    return {
+                        "temperature": round(float(t), 1),
+                        "humidity": round(float(h), 1),
+                        "gas_response": int(g),
+                        "sensor_status": "connected"
+                    }
+                else:
+                    print("GrovePi returned invalid nan/out-of-bounds sensor values.")
             except Exception as e:
                 print(f"Hardware sensor read error: {e}")
 
-        # Smooth simulation fluctuation for dev mode
+        # Smooth simulation fluctuation for dev mode or fallback
         self._sim_temp = round(max(20.0, min(40.0, self._sim_temp + random.uniform(-0.15, 0.15))), 1)
         self._sim_humidity = round(max(30.0, min(90.0, self._sim_humidity + random.uniform(-0.3, 0.3))), 1)
         self._sim_gas = max(80, min(300, self._sim_gas + random.randint(-2, 2)))
