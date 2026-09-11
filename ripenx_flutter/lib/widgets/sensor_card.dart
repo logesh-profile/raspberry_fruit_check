@@ -48,7 +48,7 @@ class SensorCard extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(
             child: Column(
-              crossAxisAlignment: CrossAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
@@ -57,7 +57,7 @@ class SensorCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Row(
-                  crossAxisAlignment: CrossAlignment.baseline,
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
                   textBaseline: TextBaseline.alphabetic,
                   children: [
                     Text(

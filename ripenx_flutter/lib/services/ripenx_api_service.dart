@@ -37,31 +37,26 @@ class RipenxApiService {
   }
 
   // 3. Trigger Scan / Inference
+  // Timeout is 30s: ONNX inference on Raspberry Pi 4B can take 5-20s.
+  // On any failure an exception is thrown — callers must handle it and show an error.
+  // NEVER returns fabricated prediction data.
   Future<InferenceResult> runScan() async {
+    final http.Response response;
     try {
-      final response = await http.post(Uri.parse('$baseUrl/api/scan')).timeout(const Duration(seconds: 5));
-      if (response.statusCode == 200) {
-        return InferenceResult.fromJson(jsonDecode(response.body));
-      }
-    } catch (_) {}
+      response = await http.post(Uri.parse('$baseUrl/api/scan'))
+          .timeout(const Duration(seconds: 30));
+    } on Exception catch (e) {
+      throw Exception('Scan failed: unable to reach backend. $e');
+    }
 
-    // Fallback demonstration scan if local Python backend service is not running
-    await Future.delayed(const Duration(milliseconds: 1200));
-    return InferenceResult(
-      status: 'result_ready',
-      fruitName: 'banana',
-      fruitConfidence: 0.92,
-      ripenessStage: 'ripe',
-      ripenessConfidence: 0.89,
-      daysRemaining: 0.0,
-      daysRangeFormatted: '0 days (Fully Ripe)',
-      temperature: 28.4,
-      humidity: 64.0,
-      gasResponse: 124,
-      imagePath: '',
-      timestamp: DateTime.now().toIso8601String(),
-      latencyMs: 145.2,
-    );
+    if (response.statusCode != 200) {
+      throw Exception(
+          'Scan failed: backend returned HTTP ${response.statusCode}. '
+          'Body: ${response.body}');
+    }
+
+    final Map<String, dynamic> body = jsonDecode(response.body);
+    return InferenceResult.fromJson(body);
   }
 
   // 4. Fetch History

@@ -28,7 +28,7 @@ class ConfidenceMeter extends StatelessWidget {
         border: Border.all(color: AppColors.glassBorder, width: 1),
       ),
       child: Column(
-        crossAxisAlignment: CrossAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,

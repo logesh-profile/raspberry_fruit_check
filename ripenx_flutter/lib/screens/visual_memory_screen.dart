@@ -70,7 +70,7 @@ class _VisualMemoryScreenState extends State<VisualMemoryScreen> {
                             const SizedBox(width: 12),
                             Expanded(
                               child: Column(
-                                crossAxisAlignment: CrossAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text('${item['fruit_name'].toString().toUpperCase()} (${item['ripeness_stage'].toString().toUpperCase()})', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppColors.deepCharcoal)),
                                   const SizedBox(height: 2),

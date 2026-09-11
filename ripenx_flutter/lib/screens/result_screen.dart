@@ -49,7 +49,7 @@ class _ResultScreenState extends State<ResultScreen> {
         child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
           child: Column(
-            crossAxisAlignment: CrossAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               // 1. Captured Fruit ROI Image Card
               Container(

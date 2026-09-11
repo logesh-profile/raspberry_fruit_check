@@ -15,7 +15,7 @@ class AppTheme {
         background: AppColors.background,
         error: AppColors.softCoral,
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         color: AppColors.surfaceCard,
         elevation: 0,
         shape: RoundedRectangleBorder(

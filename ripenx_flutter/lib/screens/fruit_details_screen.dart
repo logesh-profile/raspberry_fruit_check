@@ -20,7 +20,7 @@ class FruitDetailsScreen extends StatelessWidget {
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(20),
           child: Column(
-            crossAxisAlignment: CrossAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildDetailCard(
                 title: 'STORAGE RECOMMENDATION',
@@ -58,7 +58,7 @@ class FruitDetailsScreen extends StatelessWidget {
         border: Border.all(color: AppColors.glassBorder),
       ),
       child: Column(
-        crossAxisAlignment: CrossAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [

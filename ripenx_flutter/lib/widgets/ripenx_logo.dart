@@ -19,7 +19,7 @@ class RipenxLogo extends StatelessWidget {
       children: [
         Row(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               'RIPENX',

@@ -3,16 +3,25 @@ import math
 from typing import Any
 
 import cv2
-import torch
+import numpy as np
+import onnxruntime as ort
 from PIL import Image
-from torchvision import transforms
-from ultralytics import YOLO
-
-from model import FruitRipenessModel
-from days_model import DaysRemainingMLP
 
 
 _pipeline: dict[str, Any] | None = None
+_DEFAULT_FRUIT_INDEX = {"banana": 0, "mango": 1}
+_DEFAULT_RIPENESS_INDEX = {"overripe": 0, "ripe": 1, "unripe": 2}
+_DEFAULT_DAYS_STATS = {
+    "fruit_to_index": _DEFAULT_FRUIT_INDEX,
+    "stage_to_index": _DEFAULT_RIPENESS_INDEX,
+    "temperature_mean": 28.0,
+    "humidity_mean": 65.0,
+    "temperature_scale": 10.0,
+    "humidity_scale": 30.0,
+}
+
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 def normalize_text(value: str) -> str:
@@ -26,17 +35,119 @@ def format_days_range(days: float) -> str:
     return f"{lower}-{lower + 1} days"
 
 
+def letterbox(
+    im: np.ndarray,
+    new_shape: tuple[int, int] = (640, 640),
+    color: tuple[int, int, int] = (114, 114, 114),
+) -> tuple[np.ndarray, float, tuple[float, float]]:
+    """Resize image to new_shape with padding, maintaining aspect ratio."""
+    shape = im.shape[:2]
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
+    dw /= 2
+    dh /= 2
+
+    if shape[::-1] != new_unpad:
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+    return im, r, (dw, dh)
+
+
+def detect_fruits_yolo(
+    session: ort.InferenceSession,
+    input_name: str,
+    output_name: str,
+    frame: np.ndarray,
+    conf_thresh: float = 0.40,
+    classes: list[int] | None = None,
+    iou_thresh: float = 0.45,
+) -> list[dict[str, Any]]:
+    """Run YOLOv8 ONNX inference, decode [1, 84, 8400] output, and apply NMS."""
+    if classes is None:
+        classes = [46, 47, 49]
+    h0, w0 = frame.shape[:2]
+    img, ratio, (dw, dh) = letterbox(frame, (640, 640))
+    blob = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    blob = np.transpose(blob, (2, 0, 1))
+    blob = np.expand_dims(blob, axis=0)
+
+    preds = session.run([output_name], {input_name: blob})[0][0]
+    boxes = preds[:4, :]
+    scores = preds[4:, :]
+
+    boxes_list: list[list[int]] = []
+    scores_list: list[float] = []
+    class_ids: list[int] = []
+
+    for c in classes:
+        cls_scores = scores[c, :]
+        mask = cls_scores >= conf_thresh
+        if np.any(mask):
+            selected_boxes = boxes[:, mask]
+            selected_scores = cls_scores[mask]
+            for i in range(selected_boxes.shape[1]):
+                cx, cy, w, h = selected_boxes[:, i]
+                x1 = (cx - w / 2 - dw) / ratio
+                y1 = (cy - h / 2 - dh) / ratio
+                x2 = (cx + w / 2 - dw) / ratio
+                y2 = (cy + h / 2 - dh) / ratio
+
+                x1 = max(0, min(w0, int(round(x1))))
+                y1 = max(0, min(h0, int(round(y1))))
+                x2 = max(0, min(w0, int(round(x2))))
+                y2 = max(0, min(h0, int(round(y2))))
+
+                if x2 > x1 and y2 > y1:
+                    boxes_list.append([x1, y1, x2 - x1, y2 - y1])
+                    scores_list.append(float(selected_scores[i]))
+                    class_ids.append(c)
+
+    if not boxes_list:
+        return []
+
+    indices = cv2.dnn.NMSBoxes(boxes_list, scores_list, conf_thresh, iou_thresh)
+    results: list[dict[str, Any]] = []
+    if len(indices) > 0:
+        for idx in indices.flatten():
+            bx, by, bw, bh = boxes_list[idx]
+            results.append(
+                {
+                    "class_id": class_ids[idx],
+                    "confidence": scores_list[idx],
+                    "bbox": [bx, by, bx + bw, by + bh],
+                }
+            )
+    return results
+
+
+def preprocess_classifier_crop(crop_rgb: np.ndarray) -> np.ndarray:
+    """Preprocess cropped RGB image for EfficientNetV2-S ONNX model.
+    
+    Resize to 224x224 with Pillow BILINEAR, scale to [0, 1], normalize
+    with ImageNet mean and std, transpose HWC -> CHW, add batch dimension.
+    Returns float32 array of shape [1, 3, 224, 224].
+    """
+    pil_img = Image.fromarray(crop_rgb)
+    pil_resized = pil_img.resize((224, 224), Image.Resampling.BILINEAR)
+    arr = np.array(pil_resized, dtype=np.float32) / 255.0
+    arr = (arr - _IMAGENET_MEAN) / _IMAGENET_STD
+    return np.expand_dims(np.transpose(arr, (2, 0, 1)), axis=0).astype(np.float32)
+
+
 def create_mlp_input(
     fruit_name: str,
     stage_name: str,
     temperature: float,
     humidity: float,
     days_checkpoint: dict[str, Any],
-) -> torch.Tensor:
+) -> np.ndarray:
     fruit = normalize_text(fruit_name)
     stage = normalize_text(stage_name)
-    fruit_to_index = days_checkpoint["fruit_to_index"]
-    stage_to_index = days_checkpoint["stage_to_index"]
+    fruit_to_index = days_checkpoint.get("fruit_to_index", _DEFAULT_FRUIT_INDEX)
+    stage_to_index = days_checkpoint.get("stage_to_index", _DEFAULT_RIPENESS_INDEX)
 
     if fruit not in fruit_to_index:
         raise ValueError(f"Fruit '{fruit}' is not present in the Days Remaining model.")
@@ -48,78 +159,78 @@ def create_mlp_input(
     stage_features = [0.0] * len(stage_to_index)
     stage_features[stage_to_index[stage]] = 1.0
 
-    temperature_scale = days_checkpoint["temperature_scale"] or 1.0
-    humidity_scale = days_checkpoint["humidity_scale"] or 1.0
+    temperature_mean = days_checkpoint.get("temperature_mean", 28.0)
+    humidity_mean = days_checkpoint.get("humidity_mean", 65.0)
+    temperature_scale = days_checkpoint.get("temperature_scale") or 10.0
+    humidity_scale = days_checkpoint.get("humidity_scale") or 30.0
+
     features = fruit_features + stage_features + [
-        (temperature - days_checkpoint["temperature_mean"]) / temperature_scale,
-        (humidity - days_checkpoint["humidity_mean"]) / humidity_scale,
+        (temperature - temperature_mean) / temperature_scale,
+        (humidity - humidity_mean) / humidity_scale,
     ]
-    return torch.tensor([features], dtype=torch.float32)
+    return np.array([features], dtype=np.float32)
 
 
 def load_models() -> dict[str, Any]:
-    """Load and cache the existing detector, classifiers, and MLP."""
+    """Load and cache the ONNX inference sessions for YOLO, Classifier, and Days model."""
     global _pipeline
     if _pipeline is not None:
         return _pipeline
 
     project_root = Path(__file__).resolve().parents[1]
-    image_checkpoint_path = project_root / "models" / "best_model.pth"
-    days_checkpoint_path = project_root / "models" / "days_model.pth"
-    yolo_path = project_root / "yolov8n.pt"
+    image_model_path = project_root / "models" / "best_model.onnx"
+    days_model_path = project_root / "models" / "days_model.onnx"
+    yolo_path = project_root / "models" / "yolov8n.onnx"
 
-    for checkpoint_path in (image_checkpoint_path, days_checkpoint_path, yolo_path):
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Required model file not found:\n{checkpoint_path}")
+    for model_path in (image_model_path, days_model_path, yolo_path):
+        if not model_path.exists():
+            raise FileNotFoundError(f"Required model file not found:\n{model_path}")
 
-    image_checkpoint = torch.load(
-        image_checkpoint_path,
-        map_location=torch.device("cpu"),
-        weights_only=False,
+    image_session = ort.InferenceSession(
+        str(image_model_path),
+        providers=["CPUExecutionProvider"],
     )
-    fruit_to_index = image_checkpoint["fruit_to_index"]
-    ripeness_to_index = image_checkpoint["ripeness_to_index"]
-
-    classifier = FruitRipenessModel(
-        num_ripeness_classes=image_checkpoint.get(
-            "num_ripeness_classes", len(ripeness_to_index)
-        ),
-        num_fruit_classes=image_checkpoint.get(
-            "num_fruit_classes", len(fruit_to_index)
-        ),
-        pretrained=False,
+    days_session = ort.InferenceSession(
+        str(days_model_path),
+        providers=["CPUExecutionProvider"],
     )
-    classifier.load_state_dict(image_checkpoint["model_state"])
-    classifier.eval()
-
-    days_checkpoint = torch.load(
-        days_checkpoint_path,
-        map_location=torch.device("cpu"),
-        weights_only=False,
+    yolo_session = ort.InferenceSession(
+        str(yolo_path),
+        providers=["CPUExecutionProvider"],
     )
-    days_model = DaysRemainingMLP(input_dim=days_checkpoint["input_dim"])
-    days_model.load_state_dict(days_checkpoint["model_state"])
-    days_model.eval()
+
+    image_input_names = [item.name for item in image_session.get_inputs()]
+    image_output_names = [item.name for item in image_session.get_outputs()]
+    days_input_name = days_session.get_inputs()[0].name
+    days_output_name = days_session.get_outputs()[0].name
+    yolo_input_name = yolo_session.get_inputs()[0].name
+    yolo_output_name = yolo_session.get_outputs()[0].name
+
+    image_input_name = image_input_names[0]
+    sensor_input_name = image_input_names[1] if len(image_input_names) > 1 else image_input_names[0]
+    fruit_output_name = next((name for name in image_output_names if "fruit" in name.lower()), image_output_names[0])
+    ripeness_output_name = next(
+        (name for name in image_output_names if "ripeness" in name.lower() or "stage" in name.lower()),
+        image_output_names[1] if len(image_output_names) > 1 else image_output_names[0],
+    )
+    image_days_output_name = next((name for name in image_output_names if "day" in name.lower()), image_output_names[-1])
 
     _pipeline = {
-        "classifier": classifier,
-        "days_model": days_model,
-        "days_checkpoint": days_checkpoint,
-        "yolo_model": YOLO(str(yolo_path)),
-        "transform": transforms.Compose(
-            [
-                transforms.Resize(
-                    (image_checkpoint["image_size"], image_checkpoint["image_size"])
-                ),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    image_checkpoint["normalization"]["mean"],
-                    image_checkpoint["normalization"]["std"],
-                ),
-            ]
-        ),
-        "index_to_fruit": {v: k for k, v in fruit_to_index.items()},
-        "index_to_ripeness": {v: k for k, v in ripeness_to_index.items()},
+        "classifier_session": image_session,
+        "days_model": days_session,
+        "days_checkpoint": _DEFAULT_DAYS_STATS.copy(),
+        "yolo_session": yolo_session,
+        "yolo_input_name": yolo_input_name,
+        "yolo_output_name": yolo_output_name,
+        "index_to_fruit": {v: k for k, v in _DEFAULT_FRUIT_INDEX.items()},
+        "index_to_ripeness": {v: k for k, v in _DEFAULT_RIPENESS_INDEX.items()},
+        "image_input_name": image_input_name,
+        "sensor_input_name": sensor_input_name,
+        "fruit_output_name": fruit_output_name,
+        "ripeness_output_name": ripeness_output_name,
+        "image_days_output_name": image_days_output_name,
+        "days_input_name": days_input_name,
+        "days_output_name": days_output_name,
     }
     return _pipeline
 
@@ -129,7 +240,7 @@ def predict_frame(
     temperature: float,
     humidity: float,
 ) -> dict[str, Any]:
-    """Run YOLO, EfficientNet, and DaysRemainingMLP on one BGR frame."""
+    """Run YOLO ONNX, EfficientNet ONNX, and DaysRemainingMLP ONNX on one BGR frame."""
     if frame is None or not hasattr(frame, "shape") or frame.size == 0:
         return {
             "status": "no_frame",
@@ -169,42 +280,47 @@ def predict_frame(
         }
 
     models = load_models()
-    yolo_result = models["yolo_model"](
+    yolo_detections = detect_fruits_yolo(
+        models["yolo_session"],
+        models["yolo_input_name"],
+        models["yolo_output_name"],
         frame,
-        verbose=False,
-        conf=0.40,
+        conf_thresh=0.40,
         classes=[46, 47, 49],
-    )[0]
+    )
     detections: list[dict[str, Any]] = []
 
-    for box in yolo_result.boxes:
-        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(frame.shape[1], x2)
-        y2 = min(frame.shape[0], y2)
-        if x2 <= x1 or y2 <= y1:
-            continue
-
+    for det in yolo_detections:
+        x1, y1, x2, y2 = det["bbox"]
         crop = frame[y1:y2, x1:x2]
         if crop is None or crop.size == 0:
             continue
         crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        image_tensor = models["transform"](Image.fromarray(crop_rgb)).unsqueeze(0)
+        image_tensor = preprocess_classifier_crop(crop_rgb)
+        sensor_array = np.array([[temperature, humidity]], dtype=np.float32)
 
-        with torch.no_grad():
-            features = models["classifier"].encode_image(image_tensor)
-            fruit_logits = models["classifier"].fruit_head(features)
-            fruit_probs = torch.softmax(fruit_logits, dim=1)
-            fruit_idx = fruit_logits.argmax(dim=1).item()
-            fruit_name = models["index_to_fruit"][fruit_idx]
-            fruit_confidence = float(fruit_probs[0, fruit_idx].item())
+        image_outputs = models["classifier_session"].run(
+            [models["fruit_output_name"], models["ripeness_output_name"], models["image_days_output_name"]],
+            {
+                models["image_input_name"]: image_tensor,
+                models["sensor_input_name"]: sensor_array,
+            },
+        )
 
-            ripeness_logits = models["classifier"].ripeness_head(features)
-            ripeness_probs = torch.softmax(ripeness_logits, dim=1)
-            ripeness_idx = ripeness_logits.argmax(dim=1).item()
-            ripeness_name = models["index_to_ripeness"][ripeness_idx]
-            ripeness_confidence = float(ripeness_probs[0, ripeness_idx].item())
+        fruit_logits = image_outputs[0]
+        ripeness_logits = image_outputs[1]
+        fruit_probs = np.exp(fruit_logits[0] - np.max(fruit_logits[0]))
+        fruit_probs = fruit_probs / np.sum(fruit_probs)
+        ripeness_probs = np.exp(ripeness_logits[0] - np.max(ripeness_logits[0]))
+        ripeness_probs = ripeness_probs / np.sum(ripeness_probs)
+
+        fruit_idx = int(np.argmax(fruit_logits[0]))
+        fruit_name = models["index_to_fruit"][fruit_idx]
+        fruit_confidence = float(fruit_probs[fruit_idx])
+
+        ripeness_idx = int(np.argmax(ripeness_logits[0]))
+        ripeness_name = models["index_to_ripeness"][ripeness_idx]
+        ripeness_confidence = float(ripeness_probs[ripeness_idx])
 
         low_confidence = fruit_confidence < 0.65
         raw_days: float | None = None
@@ -218,11 +334,11 @@ def predict_frame(
                     humidity,
                     models["days_checkpoint"],
                 )
-                with torch.no_grad():
-                    raw_days = max(
-                        0.0,
-                        float(models["days_model"](mlp_input).item()),
-                    )
+                days_output = models["days_model"].run(
+                    [models["days_output_name"]],
+                    {models["days_input_name"]: mlp_input},
+                )[0]
+                raw_days = max(0.0, float(np.asarray(days_output).reshape(-1)[0]))
                 days_range = format_days_range(raw_days)
             except Exception:
                 days_range = "Unavailable"

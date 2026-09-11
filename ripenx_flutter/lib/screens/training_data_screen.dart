@@ -56,7 +56,7 @@ class _TrainingDataScreenState extends State<TrainingDataScreen> {
                           border: Border.all(color: AppColors.glassBorder),
                         ),
                         child: Column(
-                          crossAxisAlignment: CrossAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,

@@ -67,7 +67,7 @@ class _FeedbackScreenState extends State<FeedbackScreen> {
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(20),
           child: Column(
-            crossAxisAlignment: CrossAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text('What fruit is this?', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: AppColors.deepCharcoal)),
               const SizedBox(height: 10),

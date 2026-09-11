@@ -34,7 +34,7 @@ class InferenceResult {
   factory InferenceResult.fromJson(Map<String, dynamic> json) {
     return InferenceResult(
       id: json['id'] as int?,
-      status: json['status'] ?? 'result_ready',
+      status: (json['status'] ?? 'error').toString(),
       fruitName: (json['fruit_name'] ?? 'unknown').toString(),
       fruitConfidence: (json['fruit_confidence'] ?? 0.0).toDouble(),
       ripenessStage: (json['ripeness_stage'] ?? 'unknown').toString(),
